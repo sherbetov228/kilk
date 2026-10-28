@@ -1,0 +1,280 @@
+New-Item -ItemType Directory -Force -Path "src\client\java\com\example\autoattack\gui", "src\client\java\com\example\autoattack\render", "src\main\resources\assets\autoattackmod\lang" | Out-Null
+
+@"
+plugins {
+    id 'fabric-loom' version '1.9-SNAPSHOT'
+    id 'maven-publish'
+}
+version = project.mod_version
+group = project.maven_group
+base { archivesName = project.archives_base_name }
+repositories { mavenCentral() }
+dependencies {
+    minecraft "com.mojang:minecraft:`${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:`${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:`${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:`${project.fabric_version}"
+}
+loom {
+    splitEnvironmentSourceSets()
+    mods {
+        "autoattackmod" {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+processResources { inputs.property "version", project.version }
+tasks.withType(JavaCompile).configureEach { it.options.release = 21 }
+java { sourceCompatibility = JavaVersion.VERSION_21; targetCompatibility = JavaVersion.VERSION_21 }
+"@ | Set-Content -Path "build.gradle"
+
+@"
+pluginManagement {
+    repositories {
+        maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+rootProject.name = 'autoattackmod'
+"@ | Set-Content -Path "settings.gradle"
+
+@"
+org.gradle.jvmargs=-Xmx2G
+minecraft_version=1.21.11
+yarn_mappings=1.21.11+build.3
+loader_version=0.16.10
+fabric_version=0.116.5+1.21.11
+mod_version=1.0.0
+maven_group=com.example
+archives_base_name=autoattackmod
+"@ | Set-Content -Path "gradle.properties"
+
+@"
+{
+  "schemaVersion": 1, "id": "autoattackmod", "version": "1.0.0", "name": "AutoAttack",
+  "environment": "client", "entrypoints": { "client": ["com.example.autoattack.AutoAttackMod"] },
+  "depends": { "fabricloader": ">=0.16.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+}
+"@ | Set-Content -Path "src\main\resources\fabric.mod.json"
+
+@"
+{
+  "key.autoattackmod.open_gui": "Open GUI",
+  "key.autoattackmod.toggle_module": "Toggle AutoAttack",
+  "key.categories.autoattackmod.main": "AutoAttack"
+}
+"@ | Set-Content -Path "src\main\resources\assets\autoattackmod\lang\en_us.json"
+
+@"
+package com.example.autoattack;
+import com.example.autoattack.gui.AutoAttackScreen;
+import com.example.autoattack.render.FovRenderer;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.util.Identifier;
+import org.lwjgl.glfw.GLFW;
+
+public class AutoAttackMod implements ClientModInitializer {
+    public static final String MOD_ID = "autoattackmod";
+    private static AutoAttackMod instance;
+    private KeyBinding openGuiKey;
+    private KeyBinding toggleModuleKey;
+    private final AutoAttackModule module = new AutoAttackModule();
+    public static AutoAttackMod getInstance() { return instance; }
+    public AutoAttackModule getModule() { return module; }
+    public KeyBinding getToggleKey() { return toggleModuleKey; }
+
+    @Override
+    public void onInitializeClient() {
+        instance = this;
+        KeyBinding.Category category = KeyBinding.Category.create(Identifier.of(MOD_ID, "main"));
+        openGuiKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key." + MOD_ID + ".open_gui", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_RIGHT_SHIFT, category));
+        toggleModuleKey = KeyBindingHelper.registerKeyBinding(new KeyBinding("key." + MOD_ID + ".toggle_module", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_R, category));
+        KeybindManager.load(module, toggleModuleKey);
+        ClientTickEvents.END_CLIENT_TICK.register(this::onEndTick);
+        HudRenderCallback.EVENT.register(new FovRenderer(module));
+    }
+    private void onEndTick(MinecraftClient client) {
+        while (openGuiKey.wasPressed()) client.setScreen(new AutoAttackScreen(module, toggleModuleKey));
+        while (toggleModuleKey.wasPressed()) module.toggle();
+        if (module.isEnabled()) module.tick(client);
+    }
+}
+"@ | Set-Content -Path "src\client\java\com\example\autoattack\AutoAttackMod.java"
+
+@"
+package com.example.autoattack;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.mob.MobEntity;
+import net.minecraft.entity.player.PlayerEntity;
+import net.minecraft.item.ShieldItem;
+import net.minecraft.util.Hand;
+import net.minecraft.util.math.Vec3d;
+import java.util.Comparator;
+
+public class AutoAttackModule {
+    private boolean enabled = false, targetPlayers = true, targetMobs = true, legitMode = false, noAttackWhileUsingItem = false, noAttackWhileBlocking = false, onlyCriticals = false;
+    private float fov = 90f;
+    public boolean isEnabled() { return enabled; }
+    public void setEnabled(boolean v) { enabled = v; }
+    public void toggle() { enabled = !enabled; }
+    public boolean isTargetPlayers() { return targetPlayers; }
+    public void setTargetPlayers(boolean v) { targetPlayers = v; }
+    public boolean isTargetMobs() { return targetMobs; }
+    public void setTargetMobs(boolean v) { targetMobs = v; }
+    public float getFov() { return fov; }
+    public void setFov(float v) { fov = Math.max(1f, Math.min(360f, v)); }
+    public boolean isLegitMode() { return legitMode; }
+    public void setLegitMode(boolean v) { legitMode = v; }
+    public boolean isNoAttackWhileUsingItem() { return noAttackWhileUsingItem; }
+    public void setNoAttackWhileUsingItem(boolean v) { noAttackWhileUsingItem = v; }
+    public boolean isNoAttackWhileBlocking() { return noAttackWhileBlocking; }
+    public void setNoAttackWhileBlocking(boolean v) { noAttackWhileBlocking = v; }
+    public boolean isOnlyCriticals() { return onlyCriticals; }
+    public void setOnlyCriticals(boolean v) { onlyCriticals = v; }
+
+    public void tick(MinecraftClient client) {
+        if (client.player == null || client.world == null || client.interactionManager == null) return;
+        if (legitMode) {
+            if (noAttackWhileUsingItem && client.player.isUsingItem()) return;
+            if (noAttackWhileBlocking && isBlocking(client)) return;
+            if (onlyCriticals && !(!client.player.isOnGround() && client.player.fallDistance > 0.0f)) return;
+        }
+        if (client.player.getAttackCooldownProgress(0.5f) < 1.0f) return;
+        Vec3d playerPos = client.player.getPos(), lookVec = client.player.getRotationVec(1.0f).normalize();
+        LivingEntity target = client.world.getEntitiesByClass(LivingEntity.class, client.player.getBoundingBox().expand(6.0), e -> e != client.player && e.isAlive())
+            .stream().filter(e -> (e instanceof PlayerEntity && targetPlayers) || (e instanceof MobEntity && targetMobs))
+            .filter(e -> { if (fov >= 360f) return true; Vec3d toT = e.getPos().subtract(playerPos).normalize(); double dot = lookVec.dotProduct(toT); return Math.toDegrees(Math.acos(Math.max(-1, Math.min(1, dot)))) <= fov / 2.0; })
+            .min(Comparator.comparingDouble(e -> e.squaredDistanceTo(client.player))).orElse(null);
+        if (target != null) { client.interactionManager.attackEntity(client.player, target); client.player.swingHand(Hand.MAIN_HAND); }
+    }
+    private boolean isBlocking(MinecraftClient c) { return c.player.isBlocking() || (c.player.getOffHandStack().getItem() instanceof ShieldItem && c.player.isUsingItem()); }
+}
+"@ | Set-Content -Path "src\client\java\com\example\autoattack\AutoAttackModule.java"
+
+@"
+package com.example.autoattack;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+
+public class KeybindManager {
+    private static final Path CONFIG_PATH = Path.of("config", "autoattackmod.properties");
+    public static void save(AutoAttackModule m, KeyBinding k) {
+        try {
+            Files.createDirectories(CONFIG_PATH.getParent());
+            Properties p = new Properties();
+            p.setProperty("toggleKey", k.getBoundKeyTranslationKey());
+            p.setProperty("enabled", String.valueOf(m.isEnabled()));
+            p.setProperty("targetPlayers", String.valueOf(m.isTargetPlayers()));
+            p.setProperty("targetMobs", String.valueOf(m.isTargetMobs()));
+            p.setProperty("fov", String.valueOf(m.getFov()));
+            p.setProperty("legitMode", String.valueOf(m.isLegitMode()));
+            p.setProperty("noAttackWhileUsingItem", String.valueOf(m.isNoAttackWhileUsingItem()));
+            p.setProperty("noAttackWhileBlocking", String.valueOf(m.isNoAttackWhileBlocking()));
+            p.setProperty("onlyCriticals", String.valueOf(m.isOnlyCriticals()));
+            try (OutputStream out = Files.newOutputStream(CONFIG_PATH)) { p.store(out, "AutoAttack Mod Config"); }
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+    public static void load(AutoAttackModule m, KeyBinding k) {
+        if (!Files.exists(CONFIG_PATH)) return;
+        try (InputStream in = Files.newInputStream(CONFIG_PATH)) {
+            Properties p = new Properties(); p.load(in);
+            String savedKey = p.getProperty("toggleKey"); if (savedKey != null) k.setBoundKey(InputUtil.fromTranslationKey(savedKey));
+            m.setEnabled(Boolean.parseBoolean(p.getProperty("enabled", "false")));
+            m.setTargetPlayers(Boolean.parseBoolean(p.getProperty("targetPlayers", "true")));
+            m.setTargetMobs(Boolean.parseBoolean(p.getProperty("targetMobs", "true")));
+            m.setFov(Float.parseFloat(p.getProperty("fov", "90")));
+            m.setLegitMode(Boolean.parseBoolean(p.getProperty("legitMode", "false")));
+            m.setNoAttackWhileUsingItem(Boolean.parseBoolean(p.getProperty("noAttackWhileUsingItem", "false")));
+            m.setNoAttackWhileBlocking(Boolean.parseBoolean(p.getProperty("noAttackWhileBlocking", "false")));
+            m.setOnlyCriticals(Boolean.parseBoolean(p.getProperty("onlyCriticals", "false")));
+        } catch (Exception e) { e.printStackTrace(); }
+    }
+}
+"@ | Set-Content -Path "src\client\java\com\example\autoattack\KeybindManager.java"
+
+@"
+package com.example.autoattack.gui;
+import com.example.autoattack.AutoAttackModule;
+import com.example.autoattack.KeybindManager;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import net.minecraft.client.gui.widget.SliderWidget;
+import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.util.InputUtil;
+import net.minecraft.text.Text;
+import java.util.function.Consumer;
+
+public class AutoAttackScreen extends Screen {
+    private final AutoAttackModule module; private final KeyBinding toggleKey; private boolean listeningForKey = false;
+    public AutoAttackScreen(AutoAttackModule module, KeyBinding toggleKey) { super(Text.literal("AutoAttack Settings")); this.module = module; this.toggleKey = toggleKey; }
+    @Override protected void init() {
+        super.init(); int cx = this.width / 2; int y = 40;
+        addDrawableChild(ButtonWidget.builder(Text.literal("AutoAttack: " + (module.isEnabled() ? "ON" : "OFF")), btn -> { module.toggle(); btn.setMessage(Text.literal("AutoAttack: " + (module.isEnabled() ? "ON" : "OFF"))); }).bounds(cx - 100, y, 200, 20).build()); y += 25;
+        addDrawableChild(createToggle("Target Players", module::isTargetPlayers, module::setTargetPlayers, cx - 100, y)); y += 22;
+        addDrawableChild(createToggle("Target Mobs", module::isTargetMobs, module::setTargetMobs, cx - 100, y)); y += 30;
+        addDrawableChild(new FovSlider(cx - 100, y, 200, 20, module)); y += 30;
+        addDrawableChild(createToggle("Legit Mode", module::isLegitMode, module::setLegitMode, cx - 100, y)); y += 22;
+        addDrawableChild(createToggle("No Eat/Drink", module::isNoAttackWhileUsingItem, module::setNoAttackWhileUsingItem, cx - 100, y)); y += 22;
+        addDrawableChild(createToggle("No Shield", module::isNoAttackWhileBlocking, module::setNoAttackWhileBlocking, cx - 100, y)); y += 22;
+        addDrawableChild(createToggle("Only Criticals", module::isOnlyCriticals, module::setOnlyCriticals, cx - 100, y)); y += 30;
+        addDrawableChild(ButtonWidget.builder(Text.literal("Toggle Key: " + toggleKey.getBoundKeyLocalizedText().getString()), btn -> { listeningForKey = true; btn.setMessage(Text.literal("Press a key...")); }).bounds(cx - 100, y, 200, 20).build()); y += 25;
+        addDrawableChild(ButtonWidget.builder(Text.literal("Done"), btn -> { KeybindManager.save(module, toggleKey); this.close(); }).bounds(cx - 50, y, 100, 20).build());
+    }
+    private ButtonWidget createToggle(String label, java.util.function.BooleanSupplier getter, Consumer<Boolean> setter, int x, int y) {
+        return ButtonWidget.builder(Text.literal(label + ": " + (getter.getAsBoolean() ? "ON" : "OFF")), btn -> { boolean nv = !getter.getAsBoolean(); setter.accept(nv); btn.setMessage(Text.literal(label + ": " + (nv ? "ON" : "OFF"))); }).bounds(x, y, 200, 20).build();
+    }
+    private static class FovSlider extends SliderWidget {
+        private final AutoAttackModule m; public FovSlider(int x, int y, int w, int h, AutoAttackModule m) { super(x, y, w, h, Text.empty(), (m.getFov() - 1) / 359.0); this.m = m; updateMessage(); }
+        @Override protected void updateMessage() { setMessage(Text.literal("FOV: " + (int) m.getFov() + "\u00b0")); }
+        @Override protected void applyValue() { m.setFov((float) (1 + value * 359)); }
+    }
+    @Override public void render(DrawContext ctx, int mx, int my, float d) { super.render(ctx, mx, my, d); ctx.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, 15, 0xFFFFFF); }
+    @Override public boolean keyPressed(int keyCode, int scanCode, int modifiers) { if (listeningForKey) { toggleKey.setBoundKey(InputUtil.Type.KEYSYM.createFromCode(keyCode)); listeningForKey = false; this.clearAndInit(); return true; } return super.keyPressed(keyCode, scanCode, modifiers); }
+    @Override public boolean shouldPause() { return false; }
+}
+"@ | Set-Content -Path "src\client\java\com\example\autoattack\gui\AutoAttackScreen.java"
+
+@"
+package com.example.autoattack.render;
+import com.example.autoattack.AutoAttackModule;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderTickCounter;
+
+public class FovRenderer implements HudRenderCallback {
+    private final AutoAttackModule module; public FovRenderer(AutoAttackModule m) { this.module = m; }
+    @Override public void onHudRender(DrawContext ctx, RenderTickCounter tickCounter) {
+        MinecraftClient client = MinecraftClient.getInstance(); if (client.player == null || !module.isEnabled() || module.getFov() >= 180f) return;
+        int cx = ctx.getScaledWindowWidth() / 2, cy = ctx.getScaledWindowHeight() / 2, radius = 40;
+        double sa = -Math.toRadians(module.getFov() / 2.0), ea = Math.toRadians(module.getFov() / 2.0);
+        int steps = Math.max(10, (int) (module.getFov() * 2)), color = 0x88FFFFFF;
+        for (int i = 0; i < steps; i++) {
+            double a1 = sa + (ea - sa) * i / steps, a2 = sa + (ea - sa) * (i + 1) / steps;
+            drawLine(ctx, (int) (cx + radius * Math.sin(a1)), (int) (cy - radius * Math.cos(a1)), (int) (cx + radius * Math.sin(a2)), (int) (cy - radius * Math.cos(a2)), color);
+        }
+        ctx.drawText(client.textRenderer, String.format("FOV: %.0f\u00b0", module.getFov()), cx - 20, cy - radius - 15, 0xFFFFFF, true);
+    }
+    private void drawLine(DrawContext ctx, int x1, int y1, int x2, int y2, int color) {
+        int dx = Math.abs(x2 - x1), dy = Math.abs(y2 - y1), sx = x1 < x2 ? 1 : -1, sy = y1 < y2 ? 1 : -1, err = dx - dy;
+        while (true) { ctx.fill(x1, y1, x1 + 1, y1 + 1, color); if (x1 == x2 && y1 == y2) break; int e2 = 2 * err; if (e2 > -dy) { err -= dy; x1 += sx; } if (e2 < dx) { err += dx; y1 += sy; } }
+    }
+}
+"@ | Set-Content -Path "src\client\java\com\example\autoattack\render\FovRenderer.java"
+
+Write-Host "Файлы созданы!" -ForegroundColor Green
